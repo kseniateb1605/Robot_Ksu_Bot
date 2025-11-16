@@ -1,0 +1,5 @@
+aiogram>=3.0.0
+pypdf>=3.0.0
+gigachat>=0.1.0
+langdetect>=1.0.0
+requests>=2.25.0
