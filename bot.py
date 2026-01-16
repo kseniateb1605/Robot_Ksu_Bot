@@ -165,17 +165,33 @@ Be accurate and informative."""
     async def handle_text_message(self, message: Message):
         question = message.text.strip()
         if not self.loaded_documents:
-            await message.answer("Нет загруженных документов")
+            await message.answer("📭 Нет загруженных документов")
             return
-        
+
         lang_code = self.detect_language(question)
-        processing_msg = await message.answer("<b>Анализирую документы...</b>")
-        
-        context_text = ""
+        processing_msg = await message.answer("<b>🤔 Анализирую документы...</b>")
+
+        # Формируем отдельные блоки для каждого документа с метаданными
+        context_messages = []
         for filename, (text, title, author) in self.loaded_documents.items():
-            context_text += f"--- \"{title}\" автор: {author} ---\n{text}\n\n"
-        
+            snippet = text[:2000]  # Ограничение, чтобы не перегружать
+            context_messages.append(f"Document: \"{title}\" by {author}\n{snippet}")
+
+        # Объединяем все блоки в один контекст
+        context_text = "\n\n".join(context_messages)
+
+        # Добавляем системный промпт и инструкцию
+        system_prompt = self.get_system_prompt(lang_code)
+        language_instruction = self.get_language_instruction(lang_code)
+
+        # Формируем сообщение для GigaChat
+        user_message = f"{question}\n\nContext:\n{context_text}\n\n{language_instruction}\n\n" \
+                      "Cite all relevant documents in the format: \"Source: Document Title, Author\". " \
+                      "If no document contains the answer, do not provide any source."
+
+        # Отправка запроса в GigaChat
         response = self.get_gigachat_response(question, context_text, lang_code)
+
         formatted_response = f"<b>Вопрос:</b> {question}\n\n<b>Ответ:</b>\n{response}"
         await processing_msg.edit_text(formatted_response)
     
