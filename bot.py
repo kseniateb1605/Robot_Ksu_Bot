@@ -2,416 +2,317 @@ import os
 import pypdf
 import asyncio
 import numpy as np
-from typing import List, Dict, Tuple
+from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message
-from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
 
 from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
 
-from langdetect import detect, DetectorFactory
-DetectorFactory.seed = 0
-
-try:
-    from sentence_transformers import SentenceTransformer
-    EMBEDDING_MODEL_AVAILABLE = True
-except ImportError:
-    EMBEDDING_MODEL_AVAILABLE = False
-    print("sentence-transformers не установлен. Используется упрощенный эмбеддинг.")
-
-class MultiLanguageGigaChatBot:
-    def __init__(self, gigachat_token: str, telegram_token: str, chunk_size: int = 500):
+class SimpleRAGBot:
+    def __init__(self, gigachat_token: str, telegram_token: str):
         self.gigachat_token = gigachat_token
-        self.telegram_token = telegram_token
-        self.chunk_size = chunk_size
         
-        # Структуры для RAG
-        self.loaded_documents = {} 
-        self.document_chunks = {} 
-        self.chunk_embeddings = {} 
-        self.all_chunks = []       
-        self.all_embeddings = None  
-        self.chunk_to_doc = []     
+        # Модель для эмбеддингов (поддерживает русский и английский)
+        self.embed_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
         
-        # Загрузка модели эмбеддингов
-        if EMBEDDING_MODEL_AVAILABLE:
-            try:
-                self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-                print("Модель для эмбеддингов загружена")
-            except Exception as e:
-                print(f"Ошибка загрузки модели эмбеддингов: {e}")
-                EMBEDDING_MODEL_AVAILABLE = False
+        # Данные документов
+        self.documents = []
+        self.chunks = []
+        self.embeddings = None
         
-        self.preload_and_process_documents()
+        # Загрузка документов
+        self.load_documents_from_folder("data")
         
-        self.bot = Bot(
-            token=telegram_token, 
-            default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-        )
+        # Telegram бот
+        self.bot = Bot(token=telegram_token)
         self.dp = Dispatcher()
-        self.register_handlers()
-
+        self.setup_handlers()
+    
     def detect_language(self, text: str) -> str:
-        try:
-            return detect(text)
-        except:
+        """Определяет язык текста (русский или английский)"""
+        ru_chars = sum(1 for c in text if 'а' <= c.lower() <= 'я')
+        en_chars = sum(1 for c in text if 'a' <= c.lower() <= 'z')
+        
+        if ru_chars > 0:
             return 'ru'
-    
-    def get_language_instruction(self, lang_code: str) -> str:
-        instructions = {
-            'ru': "Отвечайте полностью, а цитаты указывайте только в конце в формате: \"Источник: Название документа, Автор\".",
-            'en': "Answer fully and cite sources only at the end in the format: \"Source: Document Title, Author\"."
-        }
-        return instructions.get(lang_code, instructions['ru'])
-    
-    def get_system_prompt(self, lang_code: str) -> str:
-        prompts = {
-            'ru': """Вы специалист по химии. Ответьте полностью на вопрос, строго на основе предоставленных документов. 
-Цитируйте источники только одним списком в конце ответа в формате:
-"Источник: Название документа, Автор".
-Не вставляйте ссылки после каждого предложения.
-Если информации нет в документах - скажите: "Я не могу найти ответ в предоставленных документах".
-Будьте точны и информатив.""",
-            'en': """You are a chemistry specialist. Answer the question fully, strictly based on the provided documents.
-Cite sources only at the end in the format: "Source: Document Title, Author".
-Do not insert sources after each sentence.
-If the answer is not in the documents, say: "I cannot find the answer in the provided documents".
-Be accurate and informative."""
-        }
-        return prompts.get(lang_code, prompts['ru'])
-    
-    def split_into_chunks(self, text: str, title: str, author: str) -> List[Tuple[str, Dict]]:
-        """Разделяет текст на семантические чанки"""
-        chunks = []
-        
-        # Разделение на абзацы
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-        
-        current_chunk = ""
-        current_chunk_paragraphs = []
-        
-        for paragraph in paragraphs:
-            if len(current_chunk) + len(paragraph) + 2 <= self.chunk_size:
-                current_chunk += paragraph + "\n\n"
-                current_chunk_paragraphs.append(paragraph)
-            else:
-                if current_chunk:
-                    metadata = {
-                        'title': title,
-                        'author': author,
-                        'paragraph_count': len(current_chunk_paragraphs)
-                    }
-                    chunks.append((current_chunk.strip(), metadata))
-                
-                current_chunk = paragraph + "\n\n"
-                current_chunk_paragraphs = [paragraph]
-        
-        if current_chunk:
-            metadata = {
-                'title': title,
-                'author': author,
-                'paragraph_count': len(current_chunk_paragraphs)
-            }
-            chunks.append((current_chunk.strip(), metadata))
-        
-        if not chunks and text:
-            metadata = {'title': title, 'author': author, 'paragraph_count': 1}
-            chunks.append((text.strip(), metadata))
-        
-        return chunks
-    
-    def create_embeddings(self, chunks: List[str]) -> np.ndarray:
-        """Создает эмбеддинги для чанков"""
-        if EMBEDDING_MODEL_AVAILABLE:
-            embeddings = self.embedding_model.encode(chunks)
-            return embeddings
+        elif en_chars > 0:
+            return 'en'
         else:
-            print("Используется упрощенный эмбеддинг (BoW)")
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            vectorizer = TfidfVectorizer(max_features=100)
-            embeddings = vectorizer.fit_transform(chunks).toarray()
-            return embeddings
+            return 'ru'  # по умолчанию
     
-    def preload_and_process_documents(self):
-        """Загружает и обрабатывает документы для RAG"""
-        folder_path = "/data"
+    def get_system_prompt(self, lang: str) -> str:
+        """Возвращает системный промпт на нужном языке"""
+        prompts = {
+            'ru': """Ты - помощник, который отвечает на вопросы на основе документов.
+Отвечай ТОЛЬКО используя информацию из предоставленных документов.
+Если ответа нет в документах - скажи "Не могу найти ответ в документах".
+Отвечай на русском языке.""",
+            
+            'en': """You are an assistant that answers questions based on documents.
+Answer ONLY using information from the provided documents.
+If the answer is not in the documents - say "I cannot find the answer in the documents".
+Answer in English."""
+        }
+        return prompts.get(lang, prompts['ru'])
+    
+    def load_documents_from_folder(self, folder_path: str):
+        """Загружает все PDF из папки"""
         if not os.path.exists(folder_path):
-            print(f"Папка не найдена: {folder_path}")
+            print(f"Папка {folder_path} не найдена")
             return
         
-        print("Загружаю и обрабатываю PDF файлы...")
-        all_chunks_list = []
-        
         for filename in os.listdir(folder_path):
-            if filename.lower().endswith('.pdf'):
-                try:
-                    # Загрузка PDF
-                    text, title, author = self.load_pdf_from_file(
-                        os.path.join(folder_path, filename)
-                    )
-                    self.loaded_documents[filename] = (text, title, author)
-                    
-                    # Чанкование
-                    chunks_with_metadata = self.split_into_chunks(text, title, author)
-                    self.document_chunks[filename] = chunks_with_metadata
-                    
-                    # Извлечение текста чанков для эмбеддингов
-                    chunk_texts = [chunk for chunk, _ in chunks_with_metadata]
-                    
-                    # Создание эмбеддингов
-                    if chunk_texts:
-                        embeddings = self.create_embeddings(chunk_texts)
-                        self.chunk_embeddings[filename] = embeddings
-                        
-                        # Добавление в общие структуры
-                        for i, (chunk_text, metadata) in enumerate(chunks_with_metadata):
-                            self.all_chunks.append(chunk_text)
-                            self.chunk_to_doc.append({
-                                'filename': filename,
-                                'title': metadata['title'],
-                                'author': metadata['author'],
-                                'chunk_index': i
-                            })
-                        
-                        print(f"Обработан: {filename} | Чанков: {len(chunk_texts)}")
-                    else:
-                        print(f"Нет чанков в файле: {filename}")
-                        
-                except Exception as e:
-                    print(f"Ошибка обработки {filename}: {e}")
+            if filename.endswith('.pdf'):
+                self.load_pdf(os.path.join(folder_path, filename))
         
-        # Создаем общую матрицу эмбеддингов
-        if self.all_chunks:
-            print("Создаю эмбеддинги для всех чанков...")
-            self.all_embeddings = self.create_embeddings(self.all_chunks)
-            print(f"Всего загружено: {len(self.loaded_documents)} файлов, {len(self.all_chunks)} чанков")
-        else:
-            print("Нет чанков для обработки")
+        self.create_chunks_and_embeddings()
+        print(f"Загружено {len(self.documents)} документов, {len(self.chunks)} чанков")
     
-    def load_pdf_from_file(self, file_path: str) -> tuple[str, str, str]:
-        """Загружает текст из PDF и пытается определить название и автора"""
-        with open(file_path, 'rb') as file:
-            pdf_reader = pypdf.PdfReader(file)
+    def load_pdf(self, file_path: str):
+        """Загружает один PDF файл"""
+        with open(file_path, 'rb') as f:
+            pdf = pypdf.PdfReader(f)
             text = ""
-            for page in pdf_reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-            if not text.strip():
-                raise Exception("Не удалось извлечь текст из PDF")
+            for page in pdf.pages:
+                text += page.extract_text() + "\n"
             
-            # Метаданные
-            metadata = pdf_reader.metadata or {}
-            title = metadata.get('/Title')
-            author = metadata.get('/Author')
+            metadata = pdf.metadata or {}
+            title = metadata.get('/Title', os.path.basename(file_path))
+            author = metadata.get('/Author', 'Неизвестно')
             
-            # Если метаданные пустые, пробуем из первых 15 строк текста
-            if not title or title.strip() == "":
-                first_lines = [line.strip() for line in text.splitlines() if line.strip()][:15]
-                title = max(first_lines, key=len) if first_lines else os.path.basename(file_path)
-            if not author or author.strip() == "":
-                first_lines = [line.strip() for line in text.splitlines() if line.strip()][:15]
-                author = next((line for line in first_lines if any(k in line.lower() for k in ["автор", "by", "editor", "редактор"])), "Неизвестен")
-            
-            return text, title, author
+            self.documents.append({
+                "text": text,
+                "title": title,
+                "author": author
+            })
     
-    def search_relevant_chunks(self, query: str, top_k: int = 5) -> List[Tuple[str, Dict]]:
-        """Ищет наиболее релевантные чанки для запроса"""
-        if not self.all_chunks or self.all_embeddings is None:
+    def create_chunks_and_embeddings(self, chunk_size: int = 500):
+        """Разбивает документы на чанки и создает эмбеддинги"""
+        for doc in self.documents:
+            text = doc["text"]
+            # Разделяем по двойным переносам строк (абзацы)
+            paragraphs = text.split('\n\n')
+            
+            for para in paragraphs:
+                if para.strip():
+                    if len(para) > chunk_size:
+                        sentences = para.split('. ')
+                        current_chunk = ""
+                        
+                        for sentence in sentences:
+                            if len(current_chunk) + len(sentence) < chunk_size:
+                                current_chunk += sentence + ". "
+                            else:
+                                if current_chunk:
+                                    self.chunks.append({
+                                        "text": current_chunk.strip(),
+                                        "title": doc["title"],
+                                        "author": doc["author"]
+                                    })
+                                current_chunk = sentence + ". "
+                        
+                        if current_chunk:
+                            self.chunks.append({
+                                "text": current_chunk.strip(),
+                                "title": doc["title"],
+                                "author": doc["author"]
+                            })
+                    else:
+                        self.chunks.append({
+                            "text": para.strip(),
+                            "title": doc["title"],
+                            "author": doc["author"]
+                        })
+        
+        # Создаем эмбеддинги
+        if self.chunks:
+            chunk_texts = [chunk["text"] for chunk in self.chunks]
+            self.embeddings = self.embed_model.encode(chunk_texts)
+    
+    def find_relevant_chunks(self, query: str, top_k: int = 3):
+        """Находит наиболее релевантные чанки"""
+        if not self.chunks:
             return []
         
-        # Создаем эмбеддинг для запроса
-        if EMBEDDING_MODEL_AVAILABLE:
-            query_embedding = self.embedding_model.encode([query])
-        else:
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            vectorizer = TfidfVectorizer(max_features=100)
-            all_texts = self.all_chunks + [query]
-            vectorizer.fit(all_texts)
-            query_embedding = vectorizer.transform([query]).toarray()
+        # Эмбеддинг запроса
+        query_embedding = self.embed_model.encode([query])
         
-        similarities = cosine_similarity(query_embedding, self.all_embeddings)[0]
+        # Поиск похожих чанков
+        similarities = cosine_similarity(query_embedding, self.embeddings)[0]
         
         top_indices = np.argsort(similarities)[-top_k:][::-1]
         
-        # Формируем результат
         results = []
         for idx in top_indices:
-            if idx < len(self.all_chunks):
-                chunk_text = self.all_chunks[idx]
-                doc_info = self.chunk_to_doc[idx]
-                results.append((chunk_text, doc_info))
+            if similarities[idx] > 0.2:
+                chunk = self.chunks[idx]
+                results.append({
+                    "text": chunk["text"],
+                    "title": chunk["title"],
+                    "author": chunk["author"],
+                    "score": similarities[idx]
+                })
         
         return results
     
-    def get_gigachat_response(self, question: str, context_chunks: List[Tuple[str, Dict]], lang_code: str) -> str:
-        """Получает ответ от GigaChat на основе релевантных чанков"""
+    def ask_gigachat(self, question: str, context_chunks: list, lang: str):
+        """Задает вопрос GigaChat с контекстом"""
+        context = "\n\n".join([
+            f"[Из: {chunk['title']}, автор: {chunk['author']}]\n{chunk['text']}"
+            for chunk in context_chunks
+        ])
+        
+        system_prompt = self.get_system_prompt(lang)
+        
+        if lang == 'ru':
+            user_prompt = f"""Вопрос: {question}
+
+Контекст из документов:
+{context}
+
+Ты - эксперт по химии и робототехнике. Отвечай на вопросы ТОЛЬКО на основе предоставленных документов.
+
+ПРАВИЛА:
+1. Если ответ есть в документах - дай полный ответ со всеми деталями
+2. Если информации нет в документах - скажи: "Я не могу найти ответ в предоставленных документах"
+3. Всегда цитируй источники в конце ответа в формате: "Источник: Название документа, Автор"
+4. Не упоминай, что ты используешь документы в тексте ответа
+5. Будь точным и информативным, объясняй сложные понятия простым языком
+Ответь на русском языке, используя только информацию из контекста."""
+        else:
+            user_prompt = f"""Question: {question}
+
+Document context:
+{context}
+
+You are an expert in chemistry and robotics. Answer questions ONLY based on the provided documents.
+
+RULES:
+1. If the answer is in the documents - provide a complete answer with all details
+2. If the information is not in the documents - say: "I cannot find the answer in the provided documents"
+3. Always cite sources at the end of the answer in the format: "Source: Document Title, Author"
+4. Do not mention that you are using documents in the answer text
+5. Be accurate and informative, explain complex concepts in simple language
+Answer in English, using only information from the context."""
+        
         try:
             giga = GigaChat(
                 credentials=self.gigachat_token,
                 scope="GIGACHAT_API_PERS",
-                model="GigaChat-2",
-                verify_ssl_certs=False
+                model="GigaChat-2"
             )
             
-            system_prompt = self.get_system_prompt(lang_code)
-            language_instruction = self.get_language_instruction(lang_code)
-            
-            # Формируем контекст из найденных чанков
-            context_parts = []
-            for chunk_text, doc_info in context_chunks:
-                context_parts.append(f"Document: {doc_info['title']} by {doc_info['author']}\n{chunk_text}")
-            
-            context_text = "\n\n---\n\n".join(context_parts)
-            
-            # Ограничиваем размер контекста
-            context_snippet = context_text[:6000]
-            
-            user_message = f"{question}\n\nRelevant documents:\n{context_snippet}\n\n{language_instruction}"
-            
-            payload = Chat(
+            response = giga.chat(Chat(
                 messages=[
                     Messages(role=MessagesRole.SYSTEM, content=system_prompt),
-                    Messages(role=MessagesRole.USER, content=user_message)
+                    Messages(role=MessagesRole.USER, content=user_prompt)
                 ],
                 temperature=0.1,
                 max_tokens=1500
-            )
+            ))
             
-            response = giga.chat(payload)
             return response.choices[0].message.content
             
         except Exception as e:
-            return f"Ошибка при обращении к GigaChat: {str(e)}"
+            if lang == 'ru':
+                return f"Ошибка при генерации ответа: {str(e)}"
+            else:
+                return f"Error generating answer: {str(e)}"
     
-    def register_handlers(self):
-        self.dp.message(Command("start"))(self.cmd_start)
-        self.dp.message(Command("list"))(self.cmd_list)
-        self.dp.message(Command("help"))(self.cmd_help)
-        self.dp.message(Command("stats"))(self.cmd_stats)
-        self.dp.message(F.text)(self.handle_text_message)
-    
-    async def cmd_start(self, message: Message):
-        files_count = len(self.loaded_documents)
-        chunks_count = len(self.all_chunks)
-        welcome_text = f"""
-<b>Multi-Language Chemistry RAG Bot</b>
-
-Статистика:
-• Загружено файлов: {files_count}
-• Обработано чанков: {chunks_count}
-• Используется RAG с семантическим поиском
-
-Просто задайте вопрос, и бот найдет релевантные фрагменты в документах!
-"""
-        await message.answer(welcome_text)
-    
-    async def cmd_help(self, message: Message):
-        help_text = """
-<b>Помощь / Help</b>
-
-Команды:
-/start - начать работу
-/list - показать файлы
-/stats - статистика обработки
-/help - справка
-
-Технология:
-• RAG (Retrieval-Augmented Generation)
-• Семантический поиск по эмбеддингам
-• Чанкование документов
-
-Просто задайте вопрос о химии или роботизации!
-"""
-        await message.answer(help_text)
-    
-    async def cmd_list(self, message: Message):
-        if not self.loaded_documents:
-            await message.answer("📭 Нет загруженных файлов")
-            return
+    def setup_handlers(self):
+        """Настраивает обработчики команд"""
+        @self.dp.message(Command("start"))
+        async def start(message: Message):
+            lang = self.detect_language(message.text or "")
+            if lang == 'ru':
+                text = f"RAG-бот готов к работе!\nЗагружено документов: {len(self.documents)}\nЗадайте вопрос на русском или английском."
+            else:
+                text = f"RAG-bot is ready!\nLoaded documents: {len(self.documents)}\nAsk a question in Russian or English."
+            await message.answer(text)
         
-        files_info = []
-        for filename, (text, title, author) in self.loaded_documents.items():
-            chunks_count = len(self.document_chunks.get(filename, []))
-            files_info.append(f"{filename}\n   Title: {title}\n   Author: {author}\n   Chunks: {chunks_count}")
+        @self.dp.message(Command("list"))
+        async def list_docs(message: Message):
+            lang = self.detect_language(message.text or "")
+            
+            if not self.documents:
+                if lang == 'ru':
+                    await message.answer("Нет загруженных документов")
+                else:
+                    await message.answer("No documents loaded")
+                return
+            
+            if lang == 'ru':
+                docs_list = "\n".join([f"• {doc['title']} ({doc['author']})" 
+                                     for doc in self.documents])
+                await message.answer(f"Документы:\n{docs_list}")
+            else:
+                docs_list = "\n".join([f"• {doc['title']} ({doc['author']})" 
+                                     for doc in self.documents])
+                await message.answer(f"Documents:\n{docs_list}")
         
-        await message.answer(f"<b>Загруженные файлы:</b>\n\n" + "\n\n".join(files_info))
-    
-    async def cmd_stats(self, message: Message):
-        stats_text = f"""
-<b>Статистика RAG-системы</b>
-
-• Загружено документов: {len(self.loaded_documents)}
-• Всего чанков: {len(self.all_chunks)}
-• Средний размер чанка: {self.chunk_size} символов
-• Используется эмбеддинг: {'sentence-transformers' if EMBEDDING_MODEL_AVAILABLE else 'упрощенный TF-IDF'}
-
-Чанков по документам:"""
-        
-        for filename, chunks in self.document_chunks.items():
-            stats_text += f"\n• {filename}: {len(chunks)} чанков"
-        
-        await message.answer(stats_text)
-    
-    async def handle_text_message(self, message: Message):
-        question = message.text.strip()
-        if not self.loaded_documents:
-            await message.answer("📭 Нет загруженных документов")
-            return
-        
-        # Определяем язык
-        lang_code = self.detect_language(question)
-        
-        # Информируем пользователя о процессе
-        processing_msg = await message.answer("<b>Ищу релевантные фрагменты в документах...</b>")
-        
-        # Поиск релевантных чанков с помощью RAG
-        relevant_chunks = self.search_relevant_chunks(question, top_k=5)
-        
-        if not relevant_chunks:
-            await processing_msg.edit_text("Не найдено релевантной информации в документах.")
-            return
-        
-        # Отправляем запрос в GigaChat с найденными чанками
-        response = self.get_gigachat_response(question, relevant_chunks, lang_code)
-        
-        # Форматируем ответ
-        sources_info = "\n".join([f"• {doc_info['title']} by {doc_info['author']}" 
-                                  for _, doc_info in relevant_chunks])
-        
-        formatted_response = f"""
-<b>Вопрос:</b> {question}
-
-<b>Ответ:</b>
-{response}
-
-<b>Использованные источники:</b>
-{sources_info}
-
-<i>Ответ сгенерирован с использованием RAG-системы</i>
-"""
-        
-        await processing_msg.edit_text(formatted_response)
+        @self.dp.message()
+        async def handle_question(message: Message):
+            question = message.text.strip()
+            
+            if not question:
+                return
+            
+            # Определяем язык вопроса
+            lang = self.detect_language(question)
+            
+            # Показываем статус на нужном языке
+            if lang == 'ru':
+                status = await message.answer("🔍 Ищу информацию в документах...")
+            else:
+                status = await message.answer("🔍 Searching documents...")
+            
+            # 1. Поиск релевантных чанков
+            relevant_chunks = self.find_relevant_chunks(question)
+            
+            if not relevant_chunks:
+                if lang == 'ru':
+                    await status.edit_text("Не найдено подходящей информации в документах")
+                else:
+                    await status.edit_text("No relevant information found in documents")
+                return
+            
+            # 2. Генерация ответа
+            if lang == 'ru':
+                await status.edit_text("Генерирую ответ...")
+            else:
+                await status.edit_text("Generating answer...")
+            
+            answer = self.ask_gigachat(question, relevant_chunks, lang)
+            
+            # 3. Добавляем источники
+            sources = set()
+            for chunk in relevant_chunks:
+                sources.add(f"• {chunk['title']} ({chunk['author']})")
+            
+            sources_text = "\n".join(sources)
+            
+            if lang == 'ru':
+                final_answer = f"{answer}\n\nИсточники:\n{sources_text}"
+            else:
+                final_answer = f"{answer}\n\nSources:\n{sources_text}"
+            
+            await status.edit_text(final_answer)
     
     async def run(self):
-        print(f"Бот запущен. Загружено файлов: {len(self.loaded_documents)}, чанков: {len(self.all_chunks)}")
+        """Запускает бота"""
+        print("Бот запущен!")
         await self.dp.start_polling(self.bot)
 
-
-# Настройка
-GIGACHAT_TOKEN = ""
-TELEGRAM_TOKEN = ""
-
+# Запуск бота
 async def main():
-    if not EMBEDDING_MODEL_AVAILABLE:
-        print("Для лучшей работы установите: pip install sentence-transformers")
+    GIGACHAT_TOKEN = "_token_gigachat"
+    TELEGRAM_TOKEN = "_token_telegram"
     
-    bot = MultiLanguageGigaChatBot(GIGACHAT_TOKEN, TELEGRAM_TOKEN, chunk_size=500)
+    bot = SimpleRAGBot(GIGACHAT_TOKEN, TELEGRAM_TOKEN)
     await bot.run()
 
 if __name__ == "__main__":
