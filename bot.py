@@ -25,7 +25,7 @@ class SimpleRAGBot:
         self.embeddings = None
         
         # Загрузка документов
-        self.load_documents_from_folder("data")
+        self.load_documents_from_folder("/Users/kseniatebenkova/Desktop/data")
         
         # Telegram бот
         self.bot = Bot(token=telegram_token)
@@ -61,16 +61,11 @@ Answer in English."""
     
     def load_documents_from_folder(self, folder_path: str):
         """Загружает все PDF из папки"""
-        if not os.path.exists(folder_path):
-            print(f"Папка {folder_path} не найдена")
-            return
-        
         for filename in os.listdir(folder_path):
             if filename.endswith('.pdf'):
                 self.load_pdf(os.path.join(folder_path, filename))
         
         self.create_chunks_and_embeddings()
-        print(f"Загружено {len(self.documents)} документов, {len(self.chunks)} чанков")
     
     def load_pdf(self, file_path: str):
         """Загружает один PDF файл"""
@@ -131,9 +126,9 @@ Answer in English."""
         # Создаем эмбеддинги
         if self.chunks:
             chunk_texts = [chunk["text"] for chunk in self.chunks]
-            self.embeddings = self.embed_model.encode(chunk_texts)
+            self.embeddings = self.embed_model.encode(chunk_texts, convert_to_numpy=True)
     
-    def find_relevant_chunks(self, query: str, top_k: int = 3):
+    def find_relevant_chunks(self, query: str, top_k: int = 14):
         """Находит наиболее релевантные чанки"""
         if not self.chunks:
             return []
@@ -169,20 +164,19 @@ Answer in English."""
         system_prompt = self.get_system_prompt(lang)
         
         if lang == 'ru':
-            user_prompt = f"""Вопрос: {question}
+            user_prompt = f"""Question: {question}
 
-Контекст из документов:
+Document context:
 {context}
 
-Ты - эксперт по химии и робототехнике. Отвечай на вопросы ТОЛЬКО на основе предоставленных документов.
+You are an expert in chemistry and robotics. Answer questions ONLY based on the provided documents.
 
-ПРАВИЛА:
-1. Если ответ есть в документах - дай полный ответ со всеми деталями
-2. Если информации нет в документах - скажи: "Я не могу найти ответ в предоставленных документах"
-3. Всегда цитируй источники в конце ответа в формате: "Источник: Название документа, Автор"
-4. Не упоминай, что ты используешь документы в тексте ответа
-5. Будь точным и информативным, объясняй сложные понятия простым языком
-Ответь на русском языке, используя только информацию из контекста."""
+RULES:
+1. If the answer can be formulated from the documents, provide a full, detailed, and structured answer.
+2. Explain complex concepts in simple language, provide analysis, and connect information from different documents if possible.
+3. If there is not enough information, say: "I cannot find the answer in the provided documents."
+4. Do NOT invent information or add facts not present in the context.
+Answer in Russian, using only information from the context."""
         else:
             user_prompt = f"""Question: {question}
 
@@ -192,18 +186,18 @@ Document context:
 You are an expert in chemistry and robotics. Answer questions ONLY based on the provided documents.
 
 RULES:
-1. If the answer is in the documents - provide a complete answer with all details
-2. If the information is not in the documents - say: "I cannot find the answer in the provided documents"
-3. Always cite sources at the end of the answer in the format: "Source: Document Title, Author"
-4. Do not mention that you are using documents in the answer text
-5. Be accurate and informative, explain complex concepts in simple language
+1. If the answer can be formulated from the documents, provide a full, detailed, and structured answer.
+2. Explain complex concepts in simple language, provide analysis, and connect information from different documents if possible.
+3. If there is not enough information, say: "I cannot find the answer in the provided documents."
+4. Do NOT invent information or add facts not present in the context.
 Answer in English, using only information from the context."""
         
         try:
             giga = GigaChat(
                 credentials=self.gigachat_token,
                 scope="GIGACHAT_API_PERS",
-                model="GigaChat-2"
+                model="GigaChat-2",
+                verify_ssl_certs=False
             )
             
             response = giga.chat(Chat(
@@ -211,8 +205,8 @@ Answer in English, using only information from the context."""
                     Messages(role=MessagesRole.SYSTEM, content=system_prompt),
                     Messages(role=MessagesRole.USER, content=user_prompt)
                 ],
-                temperature=0.1,
-                max_tokens=1500
+                temperature=0.3,
+                max_tokens=2000
             ))
             
             return response.choices[0].message.content
@@ -227,37 +221,26 @@ Answer in English, using only information from the context."""
         """Настраивает обработчики команд"""
         @self.dp.message(Command("start"))
         async def start(message: Message):
-            lang = self.detect_language(message.text or "")
-            if lang == 'ru':
-                text = f"RAG-бот готов к работе!\nЗагружено документов: {len(self.documents)}\nЗадайте вопрос на русском или английском."
-            else:
-                text = f"RAG-bot is ready!\nLoaded documents: {len(self.documents)}\nAsk a question in Russian or English."
+            text = (
+                f"RAG-bot is ready!\n"
+                f"Loaded documents: {len(self.documents)}\n"
+                f"Ask a question in English."
+            )
             await message.answer(text)
         
         @self.dp.message(Command("list"))
         async def list_docs(message: Message):
-            lang = self.detect_language(message.text or "")
-            
             if not self.documents:
-                if lang == 'ru':
-                    await message.answer("Нет загруженных документов")
-                else:
-                    await message.answer("No documents loaded")
+                await message.answer("No documents loaded")
                 return
             
-            if lang == 'ru':
-                docs_list = "\n".join([f"• {doc['title']} ({doc['author']})" 
+            docs_list = "\n".join([f"• {doc['title']} ({doc['author']})" 
                                      for doc in self.documents])
-                await message.answer(f"Документы:\n{docs_list}")
-            else:
-                docs_list = "\n".join([f"• {doc['title']} ({doc['author']})" 
-                                     for doc in self.documents])
-                await message.answer(f"Documents:\n{docs_list}")
+            await message.answer(f"Documents:\n{docs_list}")
         
         @self.dp.message()
         async def handle_question(message: Message):
             question = message.text.strip()
-            
             if not question:
                 return
             
@@ -270,7 +253,7 @@ Answer in English, using only information from the context."""
             else:
                 status = await message.answer("🔍 Searching documents...")
             
-            # 1. Поиск релевантных чанков
+            # Поиск релевантных чанков
             relevant_chunks = self.find_relevant_chunks(question)
             
             if not relevant_chunks:
@@ -280,7 +263,7 @@ Answer in English, using only information from the context."""
                     await status.edit_text("No relevant information found in documents")
                 return
             
-            # 2. Генерация ответа
+            # Генерация ответа
             if lang == 'ru':
                 await status.edit_text("Генерирую ответ...")
             else:
@@ -288,17 +271,21 @@ Answer in English, using only information from the context."""
             
             answer = self.ask_gigachat(question, relevant_chunks, lang)
             
-            # 3. Добавляем источники
+            # Добавляем источники
             sources = set()
             for chunk in relevant_chunks:
                 sources.add(f"• {chunk['title']} ({chunk['author']})")
             
             sources_text = "\n".join(sources)
             
-            if lang == 'ru':
+            if lang == 'ru' and answer != 'Не могу найти ответ в документах.':
                 final_answer = f"{answer}\n\nИсточники:\n{sources_text}"
-            else:
+            elif lang == 'ru' and answer == 'Не могу найти ответ в документах.':
+                final_answer = f"{answer}"
+            elif lang == 'en' and answer != 'I cannot find the answer in the provided documents.':
                 final_answer = f"{answer}\n\nSources:\n{sources_text}"
+            elif lang == 'en' and answer == 'I cannot find the answer in the provided documents.':
+                final_answer = f"{answer}"
             
             await status.edit_text(final_answer)
     
@@ -309,8 +296,8 @@ Answer in English, using only information from the context."""
 
 # Запуск бота
 async def main():
-    GIGACHAT_TOKEN = "_token_gigachat"
-    TELEGRAM_TOKEN = "_token_telegram"
+    GIGACHAT_TOKEN = ""
+    TELEGRAM_TOKEN = ""
     
     bot = SimpleRAGBot(GIGACHAT_TOKEN, TELEGRAM_TOKEN)
     await bot.run()
