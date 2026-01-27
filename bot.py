@@ -25,7 +25,7 @@ class SimpleRAGBot:
         self.embeddings = None
         
         # Загрузка документов
-        self.load_documents_from_folder("/Users/kseniatebenkova/Desktop/data")
+        self.load_documents_from_folder("/data")
         
         # Telegram бот
         self.bot = Bot(token=telegram_token)
@@ -296,8 +296,8 @@ Answer in English, using only information from the context."""
 
 # Запуск бота
 async def main():
-    GIGACHAT_TOKEN = ""
-    TELEGRAM_TOKEN = ""
+    GIGACHAT_TOKEN = "your_gigachat_token_here"
+    TELEGRAM_TOKEN = "your_telegram_token_here"
     
     bot = SimpleRAGBot(GIGACHAT_TOKEN, TELEGRAM_TOKEN)
     await bot.run()
