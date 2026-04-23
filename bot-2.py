@@ -476,8 +476,8 @@ Answer in English."""
 
 # Запуск бота
 async def main():
-    GIGACHAT_TOKEN = "MDE5OWJiMmUtNTFiNS03ZDQ0LThkYzQtNzNmNjIyZDNjODgxOjhhNDAzNTM1LTA5ZTQtNDBiNy1hOGI3LWU0NTZiYmJkNmI2MA=="
-    TELEGRAM_TOKEN = "8305901112:AAFflFFpySNg6HZfaC-zRAFQ-zuUDo-FBdQ"
+    GIGACHAT_TOKEN = ""
+    TELEGRAM_TOKEN = ""
     
     bot = SimpleRAGBot(GIGACHAT_TOKEN, TELEGRAM_TOKEN)
     await bot.run()
